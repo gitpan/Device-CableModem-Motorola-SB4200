@@ -1,0 +1,30 @@
+---
+name: Device-CableModem-Motorola-SB4200
+version: 0.10
+author:
+  - 'Burak Gursoy <burak@cpan.org>'
+abstract: Interface to Motorola SurfBoard 4200 Cable Modem
+license: perl
+resources:
+  license: http://dev.perl.org/licenses/
+  repository: http://bitbucket.org/burak/cpan-device-cablemodem-motorola-sb4200/
+requires:
+  Exception::Class: 0
+  HTML::Form: 0
+  HTML::TableParser: 0
+  LWP::UserAgent: 0
+build_requires:
+  Test::More: 0.40
+provides:
+  Device::CableModem::Motorola::SB4200:
+    file: lib/Device/CableModem/Motorola/SB4200.pm
+    version: 0.10
+no_index:
+  directory:
+    - monolithic_version
+    - builder
+    - t
+generated_by: Module::Build version 0.32
+meta-spec:
+  url: http://module-build.sourceforge.net/META-spec-v1.2.html
+  version: 1.2
