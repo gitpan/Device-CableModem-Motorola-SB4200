@@ -12,15 +12,15 @@ builder/templates/tools/Makefile.PL
 builder/templates/tools/Makefile.PL.hook
 Changes
 lib/Device/CableModem/Motorola/SB4200.pm
-LICENSE
 Makefile.PL			Generated automatically
 MANIFEST
 MANIFEST.bak
 MANIFEST.SKIP
-META.json
-META.yml
 README
 SPEC
 t/001-use.t
 xt/author/201-pod.t
 xt/author/202-pod-coverage.t
+LICENSE
+META.yml
+META.json

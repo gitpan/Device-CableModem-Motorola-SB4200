@@ -1,11 +1,16 @@
 package Device::CableModem::Motorola::SB4200;
 use strict;
 use warnings;
-use constant DEFAULT_IP => '192.168.100.1';
+use constant DEFAULT_IP        => '192.168.100.1';
+use constant RE_BUTTON_RESTART => qr{\QRestart Cable Modem\E}xmsi;
+use constant RE_BUTTON_RESET   => qr{\QReset All Defaults\E}xmsi;
+use constant RE_404            => qr{<title> File \s Not \s Found </title>}xmsi;
+use constant UA_TIMEOUT        => 5;
 use LWP::UserAgent;
 use HTML::TableParser;
 use HTML::Form;
 use Data::Dumper;
+use Carp qw( croak );
 use Exception::Class (
     'HTTP::Error',
     'HTTP::Error::NotFound' => {
@@ -16,31 +21,37 @@ use Exception::Class (
         isa         => 'HTTP::Error',
         description => 'Unable to get a result from the server',
     },
+    'Modem::Error::Command' => {
+        description => 'Unable to get execute a modem command',
+    },
 );
-use Carp qw( croak );
 
-our $VERSION = '0.10';
-my  $AGENT   = sprintf "%s/%s", __PACKAGE__, $VERSION;
+our $VERSION = '0.11';
+
+my  $AGENT   = sprintf q{%s/%s}, __PACKAGE__, $VERSION;
+my  %PAGE    = (
+    status => 'startupdata.html',
+    signal => 'signaldata.html',
+    addr   => 'addressdata.html',
+    conf   => 'configdata.html',
+    logs   => 'logsdata.html',
+    help   => 'mainhelpdata.html',
+);
 
 sub new {
-    my $class = shift;
-    my %opt   = @_ % 2 ? () : @_;
-    my %page  = (
-        status => 'startupdata.html',
-        signal => 'signaldata.html',
-        addr   => 'addressdata.html',
-        conf   => 'configdata.html',
-        logs   => 'logsdata.html',
-        help   => 'mainhelpdata.html',
-    );
-    %opt = (
+    my($class, @args) = @_;
+    my %opt   = (
         ip => DEFAULT_IP,
-        %opt,
+        ( @args % 2 ? () : @args )
     );
+
     $opt{base_url} = sprintf 'http://%s/', $opt{ip};
-    foreach my $name ( keys %page ) {
-        $opt{ 'page_' . $name } = $opt{base_url} . $page{ $name };
+    foreach my $name ( keys %PAGE ) {
+        my $id = 'page_' . $name;
+        next if $opt{ $id }; # user-defined?
+        $opt{ $id } = $opt{base_url} . $PAGE{ $name };
     }
+
     my $self = bless { %opt }, $class;
     return $self;
 }
@@ -52,38 +63,45 @@ sub restart {
 
     foreach my $e ( $form->inputs ) {
         next if $e->type ne 'submit';
-        if ( $e->value =~ m{Restart Cable Modem}si ) {
-            my $req = $e->click( $form ) || croak "Restart failed";
+        if ( $e->value =~ RE_BUTTON_RESTART ) {
+            my $req = $e->click( $form )
+                        || Modem::Error::Command->throw( 'Restart failed' );
             $req->uri( $self->{page_conf} );
             my $response = $self->_req( $req );
             return;
         }
     }
 
-    croak "Restart failed: the required button can not be found";
+    return Modem::Error::Command->throw(
+        'Restart failed: the required button can not be found'
+    );
 }
 
-sub reset {
+sub reset { ## no critic (ProhibitBuiltinHomonyms)
     my $self = shift;
     my $raw   = $self->_get( $self->{page_conf} );
     my $form  = HTML::Form->parse( $raw, $self->{page_conf} );
 
     foreach my $e ( $form->inputs ) {
         next if $e->type ne 'submit';
-        if ( $e->value =~ m{Reset All Defaults}si ) {
-            my $req = $e->click( $form ) || croak "Reset failed";
+        if ( $e->value =~ RE_BUTTON_RESET ) {
+            my $req = $e->click( $form )
+                        || Modem::Error::Command->throw( 'Reset failed' );
             $req->uri( $self->{page_conf} );
             my $response = $self->_req( $req );
             return;
         }
     }
 
-    croak "Reset failed: the required button can not be found";
+    return Modem::Error::Command->throw(
+        'Reset failed: the required button can not be found'
+    );
 }
+
 sub config {
-    my $self  = shift;
-    my $raw   = $self->_get( $self->{page_conf} );
-    my $form  = HTML::Form->parse( $raw, $self->{page_conf} );
+    my $self = shift;
+    my $raw  = $self->_get( $self->{page_conf} );
+    my $form = HTML::Form->parse( $raw, $self->{page_conf} );
     my %rv;
     foreach my $e ( $form->inputs ) {
         next if $e->type eq 'submit';
@@ -94,28 +112,28 @@ sub config {
 
 sub set_config {
     my $self  = shift;
-    my $name  = shift || croak "Config name not present";
+    my $name  = shift || croak 'Config name not present';
     my $value = shift;
-    croak "Config value not present" if not defined $value;
+    croak 'Config value not present' if not defined $value;
     my $raw   = $self->_get( $self->{page_conf} );
     my $form  = HTML::Form->parse( $raw, $self->{page_conf} );
 
     my $input;
-    my @inputs = $form->inputs;
-    foreach my $e ( @inputs ) {
-        next if $e->type eq 'submit';
-        next if $e->name ne $name;
+    foreach my $e ( @{ $form->inputs } ) {
+        next if $e->type eq 'submit' || $e->name ne $name;
         if ( my @possible = $e->possible_values ) {
-            my %valid = map { (defined $_ ? $_ : 0), 1 } @possible;
+            my %valid = map { ( (defined $_ ? $_ : 0), 1 ) } @possible;
             if ( ! $valid{ $value } ) {
                 croak "The value ($value) for $name is not valid. "
-                     ."You should select one of  these: " . join(' ',keys %valid);
+                     .'You should select one of  these: ' . join q{ }, keys %valid;
             }
         }
         $input = $e;
         last;
     }
+
     croak "$name is not a valid configuration option" if ! $input;
+
     # good to go
     $input->value($value);
     my $req = $form->click() || croak "Saving $name=$value failed";
@@ -132,7 +150,7 @@ sub addresses {
 
     my $list = sub {
         my ( $id, $line, $cols, $udata ) = @_;
-        (my $name = lc $cols->[0]) =~ tr/ /_/d;
+        (my $name = lc $cols->[0]) =~ tr/ /_/;
         $list{ $name } = $cols->[1];
         return;
     };
@@ -149,18 +167,21 @@ sub addresses {
             { id => 1.4, row  => $list },
             { id => 1.5, row  => $mac  },
         ],
-        { Decode => 1, Trim => 1, Chomp => 1 }
+        { Decode => 1, Trim => 1, Chomp => 1 },
     )->parse( $raw );
 
     my $di = $list{dhcp_information};
     $list{dhcp_information} = {};
     foreach my $info ( split m{ \r?\n }xmsi, $di ) {
-        my($name, $value) = split m{ : \s+ }xms, $info;
-        my($num, $type, $other) = split m{\s+}xms, $value;
+        my($name, $value)        = split m{ : \s+ }xms, $info;
+        my($num,  $type, $other) = split m{   \s+ }xms, $value;
         my $has_type = defined $num && defined $type && ! defined $other;
-        $list{dhcp_information}->{ $name } = $has_type ? { value => $num, type => $type } : { value => $value };
+        $list{dhcp_information}->{ $name } = $has_type
+                                           ? { value => $num, type => $type }
+                                           : { value => $value }
+                                           ;
     }
-    
+
     my %rv = (
         %list,
         known_cpe_mac_addresses => [ @mac ],
@@ -186,36 +207,36 @@ sub signal {
 
     my $down_row = sub {
         my ( $id, $line, $cols, $udata ) = @_;
-        (my $name = lc $cols->[0]) =~ tr/ /_/d;
+        (my $name = lc $cols->[0]) =~ tr/ /_/;
         $down{ $name } = $cols->[1];
         return;
     };
 
     my $up_row = sub {
         my ( $id, $line, $cols, $udata ) = @_;
-        (my $name = lc $cols->[0]) =~ tr/ /_/d;
+        (my $name = lc $cols->[0]) =~ tr/ /_/;
         $up{ $name } = $cols->[1];
         return;
     };
 
     HTML::TableParser->new(
         [
-            { id => 1.4, row  => $down_row          },
-            { id => 1.5, row  => $up_row          },
+            { id => 1.4, row  => $down_row },
+            { id => 1.5, row  => $up_row   },
         ],
-        { Decode => 1, Trim => 1, Chomp => 1 }
+        { Decode => 1, Trim => 1, Chomp => 1 },
     )->parse( $raw );
 
     foreach my $v (
         \@up{   qw( frequency power_level symbol_rate           ) },
         \@down{ qw( frequency power_level signal_to_noise_ratio ) },
     ) {
-        my($value, $unit, $status) = split m{\s+}xms, $$v;
-        $$v = {
+        my($value, $unit, $status) = split m{\s+}xms, ${$v};
+        ${$v} = {
             value  => $value,
             unit   => $unit,
         };
-        $$v->{status} = $status if defined $status;
+        ${$v}->{status} = $status if defined $status;
     }
 
     my %rv = (
@@ -233,7 +254,7 @@ sub status {
 
     my $cb_row = sub {
         my ( $id, $line, $cols, $udata ) = @_;
-        (my $name = lc $cols->[0]) =~ tr/ /_/d;
+        (my $name = lc $cols->[0]) =~ tr/ /_/;
         $rv{ $name } = $cols->[1];
         return;
     };
@@ -243,7 +264,7 @@ sub status {
             { id => 1.4, row  => $cb_row                 },
             { id => 1  , cols => qr/(?:Task|Status)/xmsi },
         ],
-        { Decode => 1, Trim => 1, Chomp => 1 }
+        { Decode => 1, Trim => 1, Chomp => 1 },
     )->parse( $raw );
 
     return %rv;
@@ -277,7 +298,7 @@ sub logs {
             { id => 1.4, row  => $cb_row                                },
             { id => 1  , cols => qr/(?:Time|Priority|Code|Message)/xmsi },
         ],
-        { Decode => 1, Trim => 1, Chomp => 1 }
+        { Decode => 1, Trim => 1, Chomp => 1 },
     )->parse( $raw );
 
     return @logs;
@@ -286,9 +307,13 @@ sub logs {
 sub versions {
     my $self = shift;
     my $raw  = $self->_get( $self->{page_help} );
-    croak "Can not get version from $self->{page_help} output: $raw"
-        if $raw !~ m{<td.+?>(.+?version.+?)</td>}xmsi;
-    (my $v = $1) =~ s{<br>}{}xmsig;
+    my $v;
+    if ( $raw =~ m{<td.+?>(.+?version.+?)</td>}xmsi ) {
+       ($v = $1) =~ s{<br>}{}xmsig;
+    }
+    else {
+       croak "Can not get version from $self->{page_help} output: $raw"
+    };
     my %rv;
     foreach my $vs ( split m/ \r? \n /xms, $self->_trim( $v ) ) {
         my($name, $value) = split m/ : \s+ /xms, $vs;
@@ -299,7 +324,7 @@ sub versions {
     $rv{software} = {
         model   => shift @soft,
         version => shift @soft,
-        string  => join('-', @soft),
+        string  => join( q{-}, @soft ),
     };
     return %rv;
 }
@@ -316,7 +341,7 @@ sub agent {
     my $self = shift;
     my $ua   = LWP::UserAgent->new;
     $ua->agent($AGENT);
-    $ua->timeout(5);
+    $ua->timeout( UA_TIMEOUT );
     return $ua;
 }
 
@@ -327,15 +352,15 @@ sub _get {
 
     if ( $r->is_success ) {
         my $raw = $r->decoded_content;
-        if ( $raw =~ m{<title> File \s Not \s Found </title>}xmsi ) {
-            HTTP::Error::NotFound->throw(
-                "The address $url is invalid. Server returned a 404 error"
-            );
-        }
+        HTTP::Error::NotFound->throw(
+            "The address $url is invalid. Server returned a 404 error"
+        ) if $raw =~ RE_404;
         return $raw;
     }
 
-    HTTP::Error::Connection->throw("GET request failed: ". $r->as_string);
+    return  HTTP::Error::Connection->throw(
+                'GET request failed: ' . $r->as_string
+            );
 }
 
 sub _req {
@@ -345,20 +370,24 @@ sub _req {
 
     if ( $r->is_success ) {
         my $raw = $r->decoded_content;
-        if ( $raw =~ m{<title> File \s Not \s Found </title>}xmsi ) {
-            HTTP::Error::NotFound->throw(
-                "The request is invalid. Server returned a 404 error"
-            );
-        }
+        HTTP::Error::NotFound->throw(
+            'The request is invalid. Server returned a 404 error'
+        ) if $raw =~ RE_404;
         return $raw;
     }
 
-    HTTP::Error::Connection->throw("HTTP::Request failed: ". $r->as_string);
+    return  HTTP::Error::Connection->throw(
+                'HTTP::Request failed: ' . $r->as_string
+            );
 }
 
 1;
 
 __END__
+
+=pod
+
+=encoding utf8
 
 =head1 NAME
 
@@ -385,6 +414,9 @@ Device::CableModem::Motorola::SB4200 - Interface to Motorola SurfBoard 4200 Cabl
    die "Unknown device disguised as SB4200" if $fw->{model} ne 'SB4200';
 
 =head1 DESCRIPTION
+
+This document describes version C<0.11> of C<Device::CableModem::Motorola::SB4200>
+released on C<27 August 2012>.
 
 This module can be used to manage/fetch every setting available via the modem's
 web interface. It is also possible to restart/reset the modem.
@@ -451,7 +483,7 @@ From the modem page:
 
 =head2 restart
 
-Restarts the modem. Usually takes 1o seconds.
+Restarts the modem. Usually takes 10 seconds.
 
 =head2 set_config
 
@@ -460,22 +492,21 @@ Can be used to alter every setting available via L</config>.
    $m->set_config( FREQ_PLAN     => "EUROPE"  );
    $m->set_config( FREQUENCY_MHZ => 543000001 );
 
-=head2 SEE ALSO
+=head1 SEE ALSO
 
 L<Device::CableModem::SURFboard>.
 
 =head1 AUTHOR
 
-Burak GE<252>rsoy, E<lt>burakE<64>cpan.orgE<gt>
+Burak Gursoy <burak@cpan.org>.
 
 =head1 COPYRIGHT
 
-Copyright 2009 Burak GE<252>rsoy. All rights reserved.
+Copyright 2009 - 2012 Burak Gursoy. All rights reserved.
 
 =head1 LICENSE
 
-This library is free software; you can redistribute it and/or modify 
-it under the same terms as Perl itself, either Perl version 5.8.8 or, 
+This library is free software; you can redistribute it and/or modify
+it under the same terms as Perl itself, either Perl version 5.12.3 or,
 at your option, any later version of Perl 5 you may have available.
-
 =cut
